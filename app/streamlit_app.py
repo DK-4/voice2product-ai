@@ -1,11 +1,13 @@
 """
-UniHack Product Intelligence -- Streamlit dashboard.
+UniHack Voice2Product AI -- Streamlit dashboard.
 
 Run with:
     streamlit run app/streamlit_app.py
 
-This talks directly to the pipeline in-process (no need to run the
-FastAPI server separately for the demo), so it works standalone.
+Voice-first flow: speak the product, AssemblyAI's Dictation API produces a
+clean transcript, and an LLM parses it into structured intake fields that
+feed unchanged into the existing 4-agent pipeline (Discovery ->
+Standardization -> Enrichment -> Trust). Manual typing still works too.
 """
 
 from __future__ import annotations
@@ -30,20 +32,70 @@ except Exception:
     pass  # no secrets.toml locally -- that's expected, .env handles it instead
 
 # THIS MUST BE THE FIRST st.* CALL IN THE WHOLE SCRIPT
-st.set_page_config(page_title="UniHack Product Intelligence", layout="wide")
+st.set_page_config(page_title="UniHack Voice2Product AI", layout="wide")
 
 from models.state import ProductIdentity, ProductState  # noqa: E402
 from orchestrator import run_pipeline  # noqa: E402
 from services.export_service import build_expected_output_row, to_csv_bytes, to_xlsx_bytes  # noqa: E402
+from services.voice_service import DictationError, parse_voice_to_product_fields, transcribe_dictation  # noqa: E402
 
-st.title("🏭 UniHack — AI Product Intelligence for Industrial Commerce")
-st.caption("Limited input → Discovery → Standardization → Enrichment → Trust/Validation → Traceable record")
+st.title("🎙️ UniHack Voice2Product AI")
+st.caption("Don't type the product. Just speak it.")
+st.caption("🎙️ Speak → ⚡ AssemblyAI → 📝 Transcript → 🤖 4 AI Agents → 🔍 Evidence → 🛡️ Trust Score → 📦 Product Intelligence")
+
+# ---------- default field values (session-state backed so voice can overwrite them) ----------
+if "part_number_input" not in st.session_state:
+    st.session_state.part_number_input = "X200"
+if "brand_input" not in st.session_state:
+    st.session_state.brand_input = "ABC Industries"
+if "description_input" not in st.session_state:
+    st.session_state.description_input = "Industrial centrifugal pump"
+if "last_transcript" not in st.session_state:
+    st.session_state.last_transcript = None
+if "audio_input_key" not in st.session_state:
+    st.session_state.audio_input_key = 0
 
 with st.sidebar:
     st.header("Product Input")
-    part_number = st.text_input("Part Number", value="X200")
-    brand = st.text_input("Brand / Manufacturer", value="ABC Industries")
-    description = st.text_area("Short Description", value="Industrial centrifugal pump")
+
+    st.markdown("#### 🎙️ Or just speak it")
+    audio_value = st.audio_input(
+        "Record a description (part number, brand, what it is)",
+        key=f"audio_recorder_{st.session_state.audio_input_key}",
+    )
+    st.caption("ℹ️ If you see a red error after recording, ignore it — click **Transcribe & Fill** anyway, it works.")
+
+
+    if audio_value is not None and st.button("⚡ Transcribe & Fill", use_container_width=True):
+        with st.spinner("Transcribing with AssemblyAI..."):
+            try:
+                audio_bytes = audio_value.read()
+                dictation_result = transcribe_dictation(audio_bytes)
+                transcript = dictation_result.get("llm_response") or dictation_result.get("text")
+                st.session_state.last_transcript = transcript
+
+                fields = parse_voice_to_product_fields(transcript)
+                if fields.get("part_number"):
+                    st.session_state.part_number_input = fields["part_number"]
+                if fields.get("brand"):
+                    st.session_state.brand_input = fields["brand"]
+                if fields.get("description"):
+                    st.session_state.description_input = fields["description"]
+
+                st.success("Transcribed! Fields updated below — review before generating.")
+                st.session_state.audio_input_key += 1
+                st.rerun()
+            except DictationError as e:
+                st.error(f"Voice transcription failed: {e}")
+
+    if st.session_state.last_transcript:
+        st.caption(f"🗒️ Last transcript: \u201c{st.session_state.last_transcript}\u201d")
+
+    st.markdown("---")
+
+    part_number = st.text_input("Part Number", key="part_number_input")
+    brand = st.text_input("Brand / Manufacturer", key="brand_input")
+    description = st.text_area("Short Description", key="description_input")
     product_url = st.text_input("Product URL (optional)")
     pdf_file = st.file_uploader("Datasheet PDF (optional)", type=["pdf"])
     image_file = st.file_uploader("Product Image (optional)", type=["jpg", "jpeg", "png"])
@@ -208,4 +260,4 @@ if state is not None:
             mime="text/csv",
         )
 else:
-    st.info("Fill in the product details in the sidebar and click **Generate Product Intelligence** to begin.")
+    st.info("🎙️ Speak your product above, or fill in the sidebar manually, then click **Generate Product Intelligence**.")
